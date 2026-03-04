@@ -6,8 +6,11 @@ classic mode, delegates to existing full-featured handlers.
 """
 
 import asyncio
+import base64
 import re
+import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -1287,6 +1290,25 @@ class MessageOrchestrator:
             # Flag is only cleared after a successful run so retries keep the intent.
             force_new = bool(context.user_data.get("force_new_session"))
 
+            # Save image to a temp file so Claude can read it directly.
+            fmt = (processed_image.metadata or {}).get("format", "jpeg") or "jpeg"
+            ext = f".{fmt.lower()}" if not fmt.startswith(".") else fmt.lower()
+            tmp_image_path = Path(tempfile.gettempdir()) / f"tg_img_{uuid.uuid4().hex[:12]}{ext}"
+            try:
+                tmp_image_path.write_bytes(base64.b64decode(processed_image.base64_data))
+            except Exception:
+                tmp_image_path = None
+
+            # Build enriched prompt that tells Claude where the image is
+            if tmp_image_path and tmp_image_path.exists():
+                enriched_prompt = (
+                    f"{processed_image.prompt}\n\n"
+                    f"The image has been saved to: {tmp_image_path}\n"
+                    f"You can read, view, or analyze this file directly."
+                )
+            else:
+                enriched_prompt = processed_image.prompt
+
             verbose_level = self._get_verbose_level(context)
             tool_log: List[Dict[str, Any]] = []
             mcp_images_photo: List[ImageAttachment] = []
@@ -1302,7 +1324,7 @@ class MessageOrchestrator:
             heartbeat = self._start_typing_heartbeat(chat)
             try:
                 claude_response = await claude_integration.run_command(
-                    prompt=processed_image.prompt,
+                    prompt=enriched_prompt,
                     working_directory=current_dir,
                     user_id=user_id,
                     session_id=session_id,
@@ -1311,6 +1333,12 @@ class MessageOrchestrator:
                 )
             finally:
                 heartbeat.cancel()
+                # Clean up temp image file
+                if tmp_image_path and tmp_image_path.exists():
+                    try:
+                        tmp_image_path.unlink()
+                    except Exception:
+                        pass
 
             if force_new:
                 context.user_data["force_new_session"] = False
