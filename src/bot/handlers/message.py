@@ -384,9 +384,18 @@ async def handle_text_message(
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
-        # Run Claude command
-        try:
-            claude_response = await claude_integration.run_command(
+        # Run Claude command — wrapped in a cancellable Task so /stop works
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        stop_keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⏹ Stop", callback_data="stop_claude")]]
+        )
+        await progress_msg.edit_text(
+            "🤔 Processing your request...", reply_markup=stop_keyboard
+        )
+
+        async def _claude_call():
+            return await claude_integration.run_command(
                 prompt=message_text,
                 working_directory=current_dir,
                 user_id=user_id,
@@ -394,6 +403,12 @@ async def handle_text_message(
                 on_stream=stream_handler,
                 force_new=force_new,
             )
+
+        claude_task = asyncio.create_task(_claude_call())
+        context.chat_data["_active_claude_task"] = claude_task
+
+        try:
+            claude_response = await claude_task
 
             # New session created successfully — clear the one-shot flag
             if force_new:
@@ -428,6 +443,11 @@ async def handle_text_message(
                 claude_response.content
             )
 
+        except asyncio.CancelledError:
+            context.chat_data.pop("_active_claude_task", None)
+            await progress_msg.edit_text("⏹ Stopped.")
+            return
+
         except Exception as e:
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
             from ..utils.formatting import FormattedMessage
@@ -435,6 +455,9 @@ async def handle_text_message(
             formatted_messages = [
                 FormattedMessage(_format_error_message(e), parse_mode="HTML")
             ]
+
+        finally:
+            context.chat_data.pop("_active_claude_task", None)
 
         # Delete progress message
         await progress_msg.delete()
