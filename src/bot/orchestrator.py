@@ -306,6 +306,9 @@ class MessageOrchestrator:
             ("status", self.agentic_status),
             ("verbose", self.agentic_verbose),
             ("repo", self.agentic_repo),
+            ("stop", self.agentic_stop),
+            ("compact", self.agentic_compact),
+            ("restart", self.agentic_restart),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -336,11 +339,11 @@ class MessageOrchestrator:
             group=10,
         )
 
-        # Only cd: callbacks (for project selection), scoped by pattern
+        # Callbacks: stop_claude (Stop button) + cd: (project selection)
         app.add_handler(
             CallbackQueryHandler(
                 self._inject_deps(self._agentic_callback),
-                pattern=r"^cd:",
+                pattern=r"^(stop_claude|cd:)",
             )
         )
 
@@ -364,6 +367,9 @@ class MessageOrchestrator:
             ("export", command.export_session),
             ("actions", command.quick_actions),
             ("git", command.git_command),
+            ("stop", command.stop_command),
+            ("compact", command.compact_command),
+            ("restart", command.restart_command),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -403,6 +409,9 @@ class MessageOrchestrator:
                 BotCommand("status", "Show session status"),
                 BotCommand("verbose", "Set output verbosity (0/1/2)"),
                 BotCommand("repo", "List repos / switch workspace"),
+                BotCommand("stop", "Cancel the running Claude call"),
+                BotCommand("compact", "Clear context window (start fresh)"),
+                BotCommand("restart", "Restart the bot process"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -422,6 +431,9 @@ class MessageOrchestrator:
                 BotCommand("export", "Export current session"),
                 BotCommand("actions", "Show quick actions"),
                 BotCommand("git", "Git repository commands"),
+                BotCommand("stop", "Cancel the running Claude call"),
+                BotCommand("compact", "Clear context window (start fresh)"),
+                BotCommand("restart", "Restart the bot process"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -878,9 +890,15 @@ class MessageOrchestrator:
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
 
-        success = True
-        try:
-            claude_response = await claude_integration.run_command(
+        # Add inline Stop button to progress message
+        stop_keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⏹ Stop", callback_data="stop_claude")]]
+        )
+        await progress_msg.edit_text("Working...", reply_markup=stop_keyboard)
+
+        # Wrap Claude call in a cancellable asyncio task so /stop can interrupt it
+        async def _claude_call() -> Any:
+            return await claude_integration.run_command(
                 prompt=message_text,
                 working_directory=current_dir,
                 user_id=user_id,
@@ -888,6 +906,13 @@ class MessageOrchestrator:
                 on_stream=on_stream,
                 force_new=force_new,
             )
+
+        claude_task: asyncio.Task[Any] = asyncio.create_task(_claude_call())
+        context.chat_data["_active_claude_task"] = claude_task
+
+        success = True
+        try:
+            claude_response = await claude_task
 
             # New session created successfully — clear the one-shot flag
             if force_new:
@@ -924,6 +949,15 @@ class MessageOrchestrator:
                 claude_response.content
             )
 
+        except asyncio.CancelledError:
+            # /stop command or inline Stop button cancelled the task
+            heartbeat.cancel()
+            context.chat_data.pop("_active_claude_task", None)
+            try:
+                await progress_msg.edit_text("⏹ Stopped.")
+            except Exception:
+                pass
+            return
         except Exception as e:
             success = False
             logger.error("Claude integration failed", error=str(e), user_id=user_id)
@@ -935,6 +969,7 @@ class MessageOrchestrator:
             ]
         finally:
             heartbeat.cancel()
+            context.chat_data.pop("_active_claude_task", None)
 
         try:
             await progress_msg.delete()
@@ -1429,11 +1464,30 @@ class MessageOrchestrator:
     async def _agentic_callback(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """Handle cd: callbacks — switch directory and resume session if available."""
+        """Handle inline button callbacks (stop_claude, cd:) in agentic mode."""
         query = update.callback_query
         await query.answer()
 
         data = query.data
+
+        # Handle Stop button
+        if data == "stop_claude":
+            task: Optional[asyncio.Task[Any]] = context.chat_data.get(
+                "_active_claude_task"
+            )
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await query.edit_message_text("⏹ Stopped.")
+                except Exception:
+                    pass
+            else:
+                try:
+                    await query.edit_message_text("Nothing is running.")
+                except Exception:
+                    pass
+            return
+
         _, project_name = data.split(":", 1)
 
         base = self.settings.approved_directory
@@ -1478,3 +1532,40 @@ class MessageOrchestrator:
                 args=[project_name],
                 success=True,
             )
+
+    # --- Control commands: stop / compact / restart ---
+
+    async def agentic_stop(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/stop — cancel the running Claude call."""
+        task: Optional[asyncio.Task[Any]] = context.chat_data.get("_active_claude_task")
+        if task and not task.done():
+            task.cancel()
+            await update.message.reply_text("⏹ Stopping...")
+        else:
+            await update.message.reply_text("Nothing is running.")
+
+    async def agentic_compact(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/compact — clear session history to free context window."""
+        context.user_data["claude_session_id"] = None
+        context.user_data["force_new_session"] = True
+        await update.message.reply_text(
+            "🗜️ Session compacted — history cleared.\n"
+            "Claude will start fresh on your next message.\n"
+            "<i>Tip: paste a summary of what we were doing to restore context.</i>",
+            parse_mode="HTML",
+        )
+
+    async def agentic_restart(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/restart — gracefully restart the bot process (requires systemd Restart=always)."""
+        import os
+        import signal
+
+        await update.message.reply_text("🔄 Restarting bot…")
+        logger.info("Bot restart requested by user", user_id=update.effective_user.id)
+        os.kill(os.getpid(), signal.SIGTERM)

@@ -1236,3 +1236,36 @@ def _escape_markdown(text: str) -> str:
     Legacy name kept for compatibility with callers; actually escapes HTML.
     """
     return escape_html(text)
+
+
+# --- Control commands: stop / compact / restart ---
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/stop — cancel the running Claude call (classic mode)."""
+    task = context.chat_data.get("_active_claude_task")
+    if task and not task.done():
+        task.cancel()
+        await update.message.reply_text("⏹ Stopping...")
+    else:
+        await update.message.reply_text("Nothing is running.")
+
+
+async def compact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/compact — clear session history to free context window (classic mode)."""
+    context.user_data["claude_session_id"] = None
+    await update.message.reply_text(
+        "🗜️ Session compacted — history cleared.\n"
+        "Claude will start fresh on your next message.\n"
+        "<i>Tip: paste a summary of what we were doing to restore context.</i>",
+        parse_mode="HTML",
+    )
+
+
+async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/restart — gracefully restart the bot process (requires systemd Restart=always)."""
+    import os
+    import signal
+
+    await update.message.reply_text("🔄 Restarting bot…")
+    logger.info("Bot restart requested by user", user_id=update.effective_user.id)
+    os.kill(os.getpid(), signal.SIGTERM)

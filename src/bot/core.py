@@ -60,7 +60,7 @@ class ClaudeCodeBot:
         builder.write_timeout(30)
         builder.pool_timeout(30)
 
-        self.app = builder.build()
+        self.app = builder.concurrent_updates(True).build()
 
         # Initialize feature registry
         self.feature_registry = FeatureRegistry(
