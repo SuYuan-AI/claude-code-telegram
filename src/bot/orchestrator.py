@@ -1534,7 +1534,7 @@ class MessageOrchestrator:
             MODELS = {
                 "sonnet": "claude-sonnet-4-6",
                 "opus": "claude-opus-4-6",
-                "haiku": "claude-haiku-4-6",
+                "haiku": "claude-haiku-4-5-20251001",
             }
             choice = data.split(":", 2)[2]
             if choice in MODELS:
@@ -1648,7 +1648,7 @@ class MessageOrchestrator:
         MODELS = {
             "sonnet": "claude-sonnet-4-6",
             "opus": "claude-opus-4-6",
-            "haiku": "claude-haiku-4-6",
+            "haiku": "claude-haiku-4-5-20251001",
         }
         args = context.args or []
         if args:
