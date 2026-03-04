@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0-dev] - 2026-03-04 (feat/bot-control-commands)
+
+### Added
+- **`/stop` command + inline ⏹ Stop button**: Cancel a running Claude call at any time.
+  Both agentic and classic modes supported. Uses `asyncio.Task.cancel()` — clean and
+  lightweight compared to process-tree killing. Stop button stays visible throughout
+  processing (fixed stream callback to preserve `reply_markup` on every progress edit).
+- **`/compact` command**: Clear session history to free the context window. Claude starts
+  fresh on the next message. Tip hint included in reply.
+- **`/model` command**: Switch Claude model on the fly via inline keyboard (Sonnet / Opus /
+  Haiku) or directly with `/model sonnet|opus|haiku`. Selection persisted per-user in
+  `user_data`, passed through facade → sdk_integration → `ClaudeAgentOptions.model`.
+- **`concurrent_updates(True)`** on PTB Application builder so `/stop` can interrupt a
+  running handler instead of queuing behind it.
+
+### Changed
+- **`/restart` command removed**: Rarely useful in daily use; confusing for end users.
+- **`_make_stream_callback`** now accepts optional `stop_keyboard` parameter so the
+  ⏹ Stop inline button is preserved on every verbose progress update.
+
+### Fixed
+- Classic mode (`message.py`) lacked `asyncio.Task` wrapping — `/stop` could not
+  cancel classic-mode responses. Now consistent with agentic mode.
+- Stop button disappeared on first stream progress update due to missing `reply_markup`
+  in `edit_text` calls inside `_make_stream_callback`.
+
+### Internal
+- `facade.run_command`, `facade._execute`, `sdk_integration.execute_command` each gain
+  an optional `model: str | None` parameter threaded through to `ClaudeAgentOptions`.
+
 ## [1.4.0] - 2026-02-27
 
 ### Added
