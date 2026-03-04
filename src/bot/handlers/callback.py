@@ -1,7 +1,8 @@
 """Handle inline keyboard callbacks."""
 
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -66,6 +67,7 @@ async def handle_callback_query(
             "conversation": handle_conversation_callback,
             "git": handle_git_callback,
             "export": handle_export_callback,
+            "resume": handle_resume_callback,
         }
 
         handler = handlers.get(action)
@@ -1314,3 +1316,47 @@ def _escape_markdown(text: str) -> str:
     Legacy name kept for compatibility with callers; actually escapes HTML.
     """
     return escape_html(text)
+
+
+def _format_age(dt: Optional[datetime]) -> str:
+    """Return a human-readable relative age string (e.g. '2h ago')."""
+    if dt is None:
+        return "?"
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = now - dt
+    if delta.days >= 1:
+        return f"{delta.days}d ago"
+    hours = delta.seconds // 3600
+    if hours >= 1:
+        return f"{hours}h ago"
+    mins = delta.seconds // 60
+    return f"{mins}m ago"
+
+
+async def handle_resume_callback(
+    query: Any, session_id: str, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle resume: callback — switch the active session."""
+    storage = context.bot_data.get("storage")
+    if not storage:
+        await query.answer("Storage unavailable.", show_alert=True)
+        return
+
+    session = await storage.sessions.get_session(session_id)
+    if not session or session.user_id != query.from_user.id:
+        await query.answer("Session not found.", show_alert=True)
+        return
+
+    context.user_data["claude_session_id"] = session_id
+    context.user_data.pop("force_new_session", None)
+
+    proj = Path(session.project_path).name if session.project_path else "?"
+    age = _format_age(session.last_used)
+    await query.edit_message_text(
+        f"✅ Resumed session <code>{session_id[:8]}</code>\n"
+        f"📂 {proj} · {age} · {session.message_count} messages\n\n"
+        f"<i>Continue chatting to pick up where you left off.</i>",
+        parse_mode="HTML",
+    )

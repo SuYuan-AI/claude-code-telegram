@@ -8,6 +8,7 @@ classic mode, delegates to existing full-featured handlers.
 import asyncio
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -309,6 +310,7 @@ class MessageOrchestrator:
             ("stop", self.agentic_stop),
             ("compact", self.agentic_compact),
             ("model", self.agentic_model),
+            ("resume", self.agentic_resume),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -339,11 +341,11 @@ class MessageOrchestrator:
             group=10,
         )
 
-        # Callbacks: stop_claude (Stop button) + cd: (project selection)
+        # Callbacks: stop_claude (Stop button) + cd: (project/model selection) + resume:
         app.add_handler(
             CallbackQueryHandler(
                 self._inject_deps(self._agentic_callback),
-                pattern=r"^(stop_claude|cd:)",
+                pattern=r"^(stop_claude|cd:|resume:)",
             )
         )
 
@@ -370,6 +372,7 @@ class MessageOrchestrator:
             ("stop", command.stop_command),
             ("compact", command.compact_command),
             ("model", command.model_command),
+            ("resume", command.resume_command),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -412,6 +415,7 @@ class MessageOrchestrator:
                 BotCommand("stop", "Cancel the running Claude call"),
                 BotCommand("compact", "Clear context window (start fresh)"),
                 BotCommand("model", "Switch model (sonnet/opus)"),
+                BotCommand("resume", "Pick a previous session to resume"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -421,6 +425,7 @@ class MessageOrchestrator:
                 BotCommand("start", "Start bot and show help"),
                 BotCommand("help", "Show available commands"),
                 BotCommand("new", "Clear context and start fresh session"),
+                BotCommand("resume", "Pick a previous session to resume"),
                 BotCommand("continue", "Explicitly continue last session"),
                 BotCommand("end", "End current session and clear context"),
                 BotCommand("ls", "List files in current directory"),
@@ -1499,18 +1504,40 @@ class MessageOrchestrator:
         # Handle model selection buttons
         if data.startswith("cd:model:"):
             MODELS = {
-                "sonnet": "claude-sonnet-4-5",
-                "opus": "claude-opus-4-5",
-                "haiku": "claude-haiku-4-5",
+                "sonnet": "claude-sonnet-4-6",
+                "opus": "claude-opus-4-6",
+                "haiku": "claude-haiku-4-6",
             }
             choice = data.split(":", 2)[2]
             if choice in MODELS:
                 context.user_data["claude_model"] = MODELS[choice]
                 await query.edit_message_text(
-                    f"✅ Switched to <b>{choice.capitalize()}</b> "
-                    f"(<code>{MODELS[choice]}</code>)",
+                    f"✅ Switched to <b>{choice.capitalize()}</b>",
                     parse_mode="HTML",
                 )
+            return
+
+        # Handle session resume buttons
+        if data.startswith("resume:"):
+            session_id = data[len("resume:"):]
+            storage = context.bot_data.get("storage")
+            if not storage:
+                await query.answer("Storage unavailable.", show_alert=True)
+                return
+            session = await storage.sessions.get_session(session_id)
+            if not session or session.user_id != query.from_user.id:
+                await query.answer("Session not found.", show_alert=True)
+                return
+            context.user_data["claude_session_id"] = session_id
+            context.user_data.pop("force_new_session", None)
+            proj = Path(session.project_path).name if session.project_path else "?"
+            age = _format_age(session.last_used)
+            await query.edit_message_text(
+                f"✅ Resumed session <code>{session_id[:8]}</code>\n"
+                f"📂 {proj} · {age} · {session.message_count} messages\n\n"
+                f"<i>Continue chatting to pick up where you left off.</i>",
+                parse_mode="HTML",
+            )
             return
 
         _, project_name = data.split(":", 1)
@@ -1591,9 +1618,9 @@ class MessageOrchestrator:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         MODELS = {
-            "sonnet": "claude-sonnet-4-5",
-            "opus": "claude-opus-4-5",
-            "haiku": "claude-haiku-4-5",
+            "sonnet": "claude-sonnet-4-6",
+            "opus": "claude-opus-4-6",
+            "haiku": "claude-haiku-4-6",
         }
         args = context.args or []
         if args:
@@ -1601,8 +1628,7 @@ class MessageOrchestrator:
             if choice in MODELS:
                 context.user_data["claude_model"] = MODELS[choice]
                 await update.message.reply_text(
-                    f"✅ Switched to <b>{choice.capitalize()}</b> "
-                    f"(<code>{MODELS[choice]}</code>)",
+                    f"✅ Switched to <b>{choice.capitalize()}</b>",
                     parse_mode="HTML",
                 )
             else:
@@ -1628,3 +1654,64 @@ class MessageOrchestrator:
                 parse_mode="HTML",
                 reply_markup=keyboard,
             )
+
+    async def agentic_resume(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """/resume — list recent sessions and let user pick one to restore."""
+        user_id = update.effective_user.id
+        storage = context.bot_data.get("storage")
+
+        if not storage:
+            await update.message.reply_text("Storage unavailable.")
+            return
+
+        sessions = await storage.sessions.get_user_sessions(user_id, active_only=False)
+        if not sessions:
+            await update.message.reply_text(
+                "No previous sessions found.\nUse <code>/new</code> to start one.",
+                parse_mode="HTML",
+            )
+            return
+
+        current_session_id = context.user_data.get("claude_session_id")
+
+        # Build inline keyboard — up to 8 most recent sessions
+        keyboard = []
+        for s in sessions[:8]:
+            is_current = s.session_id == current_session_id
+            proj = Path(s.project_path).name if s.project_path else "?"
+            age = _format_age(s.last_used)
+            prefix = "✅ " if is_current else ""
+            label = f"{prefix}#{s.session_id[:6]} · {proj} · {age} · {s.message_count}msg"
+            keyboard.append(
+                [InlineKeyboardButton(label, callback_data=f"resume:{s.session_id}")]
+            )
+
+        current_info = (
+            f"\nCurrent: <code>{current_session_id[:8]}</code>"
+            if current_session_id
+            else "\nNo active session."
+        )
+        await update.message.reply_text(
+            f"📋 <b>Session History</b>{current_info}\n\nSelect a session to resume:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+
+def _format_age(dt: Optional[datetime]) -> str:
+    """Return a human-readable relative age string (e.g. '2h ago')."""
+    if dt is None:
+        return "?"
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    delta = now - dt
+    if delta.days >= 1:
+        return f"{delta.days}d ago"
+    hours = delta.seconds // 3600
+    if hours >= 1:
+        return f"{hours}h ago"
+    mins = delta.seconds // 60
+    return f"{mins}m ago"
