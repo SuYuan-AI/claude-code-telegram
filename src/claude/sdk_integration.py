@@ -152,6 +152,7 @@ class ClaudeSDKManager:
         session_id: Optional[str] = None,
         continue_session: bool = False,
         stream_callback: Optional[Callable[[StreamUpdate], None]] = None,
+        model: Optional[str] = None,
     ) -> ClaudeResponse:
         """Execute Claude Code command via SDK."""
         start_time = asyncio.get_event_loop().time()
@@ -201,6 +202,7 @@ class ClaudeSDKManager:
                 allowed_tools=sdk_allowed_tools,
                 disallowed_tools=sdk_disallowed_tools,
                 cli_path=self.config.claude_cli_path or None,
+                model=model or self.config.claude_model or None,
                 sandbox={
                     "enabled": self.config.sandbox_enabled,
                     "autoAllowBashIfSandboxed": True,

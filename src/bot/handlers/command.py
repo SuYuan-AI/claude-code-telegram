@@ -1261,11 +1261,44 @@ async def compact_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
-async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/restart — gracefully restart the bot process (requires systemd Restart=always)."""
-    import os
-    import signal
+async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/model [sonnet|opus|haiku] — show or switch the Claude model."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-    await update.message.reply_text("🔄 Restarting bot…")
-    logger.info("Bot restart requested by user", user_id=update.effective_user.id)
-    os.kill(os.getpid(), signal.SIGTERM)
+    MODELS = {
+        "sonnet": "claude-sonnet-4-5",
+        "opus": "claude-opus-4-5",
+        "haiku": "claude-haiku-4-5",
+    }
+    args = context.args or []
+    if args:
+        choice = args[0].lower().rstrip(".")
+        if choice in MODELS:
+            context.user_data["claude_model"] = MODELS[choice]
+            await update.message.reply_text(
+                f"✅ Switched to <b>{choice.capitalize()}</b> "
+                f"(<code>{MODELS[choice]}</code>)",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ Unknown model <code>{choice}</code>. Use: sonnet, opus, or haiku",
+                parse_mode="HTML",
+            )
+    else:
+        current_raw = context.user_data.get("claude_model")
+        current_label = next(
+            (k for k, v in MODELS.items() if v == current_raw), "default (sonnet)"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("Sonnet", callback_data="cd:model:sonnet"),
+                InlineKeyboardButton("Opus", callback_data="cd:model:opus"),
+                InlineKeyboardButton("Haiku", callback_data="cd:model:haiku"),
+            ]
+        ])
+        await update.message.reply_text(
+            f"🤖 Current model: <b>{current_label}</b>\n\nSelect a model:",
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )

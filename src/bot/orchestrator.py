@@ -308,7 +308,7 @@ class MessageOrchestrator:
             ("repo", self.agentic_repo),
             ("stop", self.agentic_stop),
             ("compact", self.agentic_compact),
-            ("restart", self.agentic_restart),
+            ("model", self.agentic_model),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -369,7 +369,7 @@ class MessageOrchestrator:
             ("git", command.git_command),
             ("stop", command.stop_command),
             ("compact", command.compact_command),
-            ("restart", command.restart_command),
+            ("model", command.model_command),
         ]
         if self.settings.enable_project_threads:
             handlers.append(("sync_threads", command.sync_threads))
@@ -411,7 +411,7 @@ class MessageOrchestrator:
                 BotCommand("repo", "List repos / switch workspace"),
                 BotCommand("stop", "Cancel the running Claude call"),
                 BotCommand("compact", "Clear context window (start fresh)"),
-                BotCommand("restart", "Restart the bot process"),
+                BotCommand("model", "Switch model (sonnet/opus)"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -433,7 +433,7 @@ class MessageOrchestrator:
                 BotCommand("git", "Git repository commands"),
                 BotCommand("stop", "Cancel the running Claude call"),
                 BotCommand("compact", "Clear context window (start fresh)"),
-                BotCommand("restart", "Restart the bot process"),
+                BotCommand("model", "Switch model (sonnet/opus)"),
             ]
             if self.settings.enable_project_threads:
                 commands.append(BotCommand("sync_threads", "Sync project topics"))
@@ -674,6 +674,7 @@ class MessageOrchestrator:
         start_time: float,
         mcp_images: Optional[List[ImageAttachment]] = None,
         approved_directory: Optional[Path] = None,
+        stop_keyboard: Any = None,
     ) -> Optional[Callable[[StreamUpdate], Any]]:
         """Create a stream callback for verbose progress updates.
 
@@ -736,7 +737,9 @@ class MessageOrchestrator:
                         tool_log, verbose_level, start_time
                     )
                     try:
-                        await progress_msg.edit_text(new_text)
+                        await progress_msg.edit_text(
+                            new_text, reply_markup=stop_keyboard
+                        )
                     except Exception:
                         pass
 
@@ -874,6 +877,11 @@ class MessageOrchestrator:
         # Flag is only cleared after a successful run so retries keep the intent.
         force_new = bool(context.user_data.get("force_new_session"))
 
+        # Inline Stop button — created first so stream callback can keep it visible
+        stop_keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⏹ Stop", callback_data="stop_claude")]]
+        )
+
         # --- Verbose progress tracking via stream callback ---
         tool_log: List[Dict[str, Any]] = []
         start_time = time.time()
@@ -885,18 +893,17 @@ class MessageOrchestrator:
             start_time,
             mcp_images=mcp_images,
             approved_directory=self.settings.approved_directory,
+            stop_keyboard=stop_keyboard,
         )
 
         # Independent typing heartbeat — stays alive even with no stream events
         heartbeat = self._start_typing_heartbeat(chat)
 
-        # Add inline Stop button to progress message
-        stop_keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⏹ Stop", callback_data="stop_claude")]]
-        )
         await progress_msg.edit_text("Working...", reply_markup=stop_keyboard)
 
         # Wrap Claude call in a cancellable asyncio task so /stop can interrupt it
+        user_model = context.user_data.get("claude_model")  # None = use default
+
         async def _claude_call() -> Any:
             return await claude_integration.run_command(
                 prompt=message_text,
@@ -905,6 +912,7 @@ class MessageOrchestrator:
                 session_id=session_id,
                 on_stream=on_stream,
                 force_new=force_new,
+                model=user_model,
             )
 
         claude_task: asyncio.Task[Any] = asyncio.create_task(_claude_call())
@@ -1488,6 +1496,23 @@ class MessageOrchestrator:
                     pass
             return
 
+        # Handle model selection buttons
+        if data.startswith("cd:model:"):
+            MODELS = {
+                "sonnet": "claude-sonnet-4-5",
+                "opus": "claude-opus-4-5",
+                "haiku": "claude-haiku-4-5",
+            }
+            choice = data.split(":", 2)[2]
+            if choice in MODELS:
+                context.user_data["claude_model"] = MODELS[choice]
+                await query.edit_message_text(
+                    f"✅ Switched to <b>{choice.capitalize()}</b> "
+                    f"(<code>{MODELS[choice]}</code>)",
+                    parse_mode="HTML",
+                )
+            return
+
         _, project_name = data.split(":", 1)
 
         base = self.settings.approved_directory
@@ -1533,7 +1558,7 @@ class MessageOrchestrator:
                 success=True,
             )
 
-    # --- Control commands: stop / compact / restart ---
+    # --- Control commands: stop / compact / model ---
 
     async def agentic_stop(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -1559,13 +1584,47 @@ class MessageOrchestrator:
             parse_mode="HTML",
         )
 
-    async def agentic_restart(
+    async def agentic_model(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        """/restart — gracefully restart the bot process (requires systemd Restart=always)."""
-        import os
-        import signal
+        """/model [sonnet|opus|haiku] — show or switch the Claude model."""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-        await update.message.reply_text("🔄 Restarting bot…")
-        logger.info("Bot restart requested by user", user_id=update.effective_user.id)
-        os.kill(os.getpid(), signal.SIGTERM)
+        MODELS = {
+            "sonnet": "claude-sonnet-4-5",
+            "opus": "claude-opus-4-5",
+            "haiku": "claude-haiku-4-5",
+        }
+        args = context.args or []
+        if args:
+            choice = args[0].lower().rstrip(".")
+            if choice in MODELS:
+                context.user_data["claude_model"] = MODELS[choice]
+                await update.message.reply_text(
+                    f"✅ Switched to <b>{choice.capitalize()}</b> "
+                    f"(<code>{MODELS[choice]}</code>)",
+                    parse_mode="HTML",
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Unknown model <code>{choice}</code>. "
+                    "Use: sonnet, opus, or haiku",
+                    parse_mode="HTML",
+                )
+        else:
+            current_raw = context.user_data.get("claude_model")
+            current_label = next(
+                (k for k, v in MODELS.items() if v == current_raw), "default (sonnet)"
+            )
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Sonnet", callback_data="cd:model:sonnet"),
+                    InlineKeyboardButton("Opus", callback_data="cd:model:opus"),
+                    InlineKeyboardButton("Haiku", callback_data="cd:model:haiku"),
+                ]
+            ])
+            await update.message.reply_text(
+                f"🤖 Current model: <b>{current_label}</b>\n\nSelect a model:",
+                parse_mode="HTML",
+                reply_markup=keyboard,
+            )

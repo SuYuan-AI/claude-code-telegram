@@ -380,7 +380,11 @@ async def handle_text_message(
             try:
                 progress_text = await _format_progress_update(update_obj)
                 if progress_text:
-                    await progress_msg.edit_text(progress_text, parse_mode="HTML")
+                    await progress_msg.edit_text(
+                        progress_text,
+                        parse_mode="HTML",
+                        reply_markup=stop_keyboard,
+                    )
             except Exception as e:
                 logger.warning("Failed to update progress message", error=str(e))
 
